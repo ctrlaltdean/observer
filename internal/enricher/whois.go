@@ -76,6 +76,7 @@ func (w *WHOISEnricher) enrichIP(ctx context.Context, ip string) (*model.SourceR
 		Name:   w.Name(),
 		Status: "ok",
 		Data:   data,
+		RawURL: fmt.Sprintf("https://search.arin.net/rdap/?query=%s", ip),
 	}, nil
 }
 

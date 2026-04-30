@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -158,6 +160,15 @@ func main() {
 		},
 	})
 
+	// ─── update ───────────────────────────────────────────────────────────
+	root.AddCommand(&cobra.Command{
+		Use:   "update",
+		Short: "Check for a newer version and update if available",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runUpdate()
+		},
+	})
+
 	// ─── keys ─────────────────────────────────────────────────────────────
 	root.AddCommand(&cobra.Command{
 		Use:   "keys",
@@ -286,6 +297,68 @@ Navigation: ↑/↓ or j/k  |  Enter: edit  |  d: clear  |  Ctrl+S: save & exit 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// runUpdate checks GitHub for a newer release and updates via go install if one is found.
+func runUpdate() error {
+	fmt.Print("Checking for updates... ")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://api.github.com/repos/ctrlaltdean/observer/releases/latest", nil)
+	if err != nil {
+		return fmt.Errorf("could not build request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("could not reach GitHub: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return fmt.Errorf("could not parse response: %w", err)
+	}
+
+	fmt.Printf("current: %s  latest: %s\n", Version, release.TagName)
+
+	if Version == "dev" {
+		fmt.Printf("Running a dev build — skipping auto-update.\n")
+		fmt.Printf("Latest release: %s\n  %s\n", release.TagName, release.HTMLURL)
+		return nil
+	}
+
+	// Normalize both to "vX.Y.Z" for comparison.
+	current := "v" + strings.TrimPrefix(Version, "v")
+	latest := "v" + strings.TrimPrefix(release.TagName, "v")
+	if current == latest {
+		fmt.Println("Already up to date.")
+		return nil
+	}
+
+	// Different version — attempt go install.
+	fmt.Printf("Updating to %s...\n", release.TagName)
+	cmd := exec.CommandContext(ctx, "go", "install",
+		"github.com/ctrlaltdean/observer/cmd/observe@latest")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\ngo install failed — download the binary directly:\n  %s\n", release.HTMLURL)
+		return nil
+	}
+	fmt.Println("Update complete. Restart observe to use the new version.")
+	return nil
 }
 
 // runBulk processes multiple observables with bounded concurrency.

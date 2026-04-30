@@ -436,14 +436,15 @@ func RenderTable(result *model.EnrichmentResult, w io.Writer) error {
 		switch sr.Status {
 		case "ok":
 			icon = "✅"
-			text = name
+			text = termLink(isTTY, name, sr.RawURL)
+			text = applyIf(styleGreen, text)
 		case "rate_limited":
 			icon = "⚠️"
-			text = name + " [rate limited]"
+			text = termLink(isTTY, name+" [rate limited]", sr.RawURL)
 			text = applyIf(styleYellow, text)
 		case "error":
 			icon = "❌"
-			text = name + " [error]"
+			text = termLink(isTTY, name+" [error]", sr.RawURL)
 			text = applyIf(styleRed, text)
 		case "unsupported":
 			icon = "—"
@@ -451,9 +452,6 @@ func RenderTable(result *model.EnrichmentResult, w io.Writer) error {
 		default:
 			icon = "?"
 			text = name
-		}
-		if sr.Status == "ok" {
-			text = applyIf(styleGreen, text)
 		}
 		parts = append(parts, icon+" "+text)
 	}
@@ -614,4 +612,14 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// termLink wraps text in an OSC 8 terminal hyperlink when writing to a TTY.
+// Supported by Windows Terminal, iTerm2, GNOME Terminal, and most modern terminals.
+// Falls back to plain text when url is empty or not a TTY.
+func termLink(isTTY bool, text, url string) string {
+	if !isTTY || url == "" {
+		return text
+	}
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }
