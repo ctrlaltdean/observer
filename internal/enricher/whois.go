@@ -53,7 +53,6 @@ func (w *WHOISEnricher) enrichIP(ctx context.Context, ip string) (*model.SourceR
 	// rDNS lookup.
 	ptrs, err := net.DefaultResolver.LookupAddr(ctx, ip)
 	if err == nil && len(ptrs) > 0 {
-		// Strip trailing dots from PTR records.
 		clean := make([]string, len(ptrs))
 		for i, p := range ptrs {
 			clean[i] = strings.TrimSuffix(p, ".")
@@ -61,50 +60,81 @@ func (w *WHOISEnricher) enrichIP(ctx context.Context, ip string) (*model.SourceR
 		data["ptr_records"] = clean
 	}
 
-	// WHOIS lookup on the IP itself (returns ASN/org info from RIR).
+	// WHOIS lookup returns RIR-format text (ARIN/RIPE/APNIC/LACNIC/AFRINIC).
+	// whoisparser is domain-registrar-only, so we parse the raw text ourselves.
 	raw, err := whois.Whois(ip)
 	if err != nil {
 		if len(data) > 0 {
-			// We have PTR data — return partial success.
-			return &model.SourceResult{
-				Name:   w.Name(),
-				Status: "ok",
-				Data:   data,
-			}, nil
+			return &model.SourceResult{Name: w.Name(), Status: "ok", Data: data}, nil
 		}
 		return errResult(w.Name(), fmt.Sprintf("WHOIS query failed: %v", err)), nil
 	}
 
-	parsed, err := whoisparser.Parse(raw)
-	if err == nil {
-		if parsed.Registrar != nil && parsed.Registrar.Name != "" {
-			data["registrar"] = parsed.Registrar.Name
-		}
-		if parsed.Registrant != nil {
-			org := parsed.Registrant.Organization
-			if org == "" {
-				org = "Redacted"
-			}
-			data["registrant_organization"] = org
-		}
-		if parsed.Domain != nil {
-			setIfNotEmpty(data, "created_date", parsed.Domain.CreatedDate)
-			setIfNotEmpty(data, "updated_date", parsed.Domain.UpdatedDate)
-			setIfNotEmpty(data, "expiration_date", parsed.Domain.ExpirationDate)
-			if len(parsed.Domain.NameServers) > 0 {
-				data["name_servers"] = parsed.Domain.NameServers
-			}
-			if len(parsed.Domain.Status) > 0 {
-				data["status"] = parsed.Domain.Status
-			}
-		}
-	}
+	parseRIRWhois(raw, data)
 
 	return &model.SourceResult{
 		Name:   w.Name(),
 		Status: "ok",
 		Data:   data,
 	}, nil
+}
+
+// parseRIRWhois extracts fields from raw RIR WHOIS text (ARIN/RIPE/APNIC/LACNIC/AFRINIC).
+// RIR format is key: value lines; we pick the first occurrence of each field we care about.
+func parseRIRWhois(raw string, data map[string]any) {
+	// Priority-ordered aliases for each logical field.
+	// First key in each slice that appears in the text wins.
+	fieldMap := []struct {
+		out     string
+		aliases []string
+	}{
+		{"organization", []string{"orgname", "organization", "org-name", "descr", "owner"}},
+		{"network_name", []string{"netname", "net-name"}},
+		{"cidr", []string{"cidr", "inetnum", "inet6num"}},
+		{"country", []string{"country"}},
+		{"registered", []string{"regdate", "created"}},
+		{"updated", []string{"updated", "last-modified", "changed"}},
+		{"rir", []string{"source"}},
+		{"asn", []string{"originas", "origin"}},
+	}
+
+	// Track which output fields we've already filled.
+	filled := map[string]bool{}
+
+	for _, line := range strings.Split(raw, "\n") {
+		// Skip comment lines.
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "%") {
+			continue
+		}
+
+		idx := strings.IndexByte(line, ':')
+		if idx < 0 {
+			continue
+		}
+		rawKey := strings.ToLower(strings.TrimSpace(line[:idx]))
+		val := strings.TrimSpace(line[idx+1:])
+		if val == "" {
+			continue
+		}
+
+		for _, f := range fieldMap {
+			if filled[f.out] {
+				continue
+			}
+			for _, alias := range f.aliases {
+				if rawKey == alias {
+					data[f.out] = val
+					filled[f.out] = true
+					break
+				}
+			}
+		}
+
+		if len(filled) == len(fieldMap) {
+			break
+		}
+	}
 }
 
 func (w *WHOISEnricher) enrichDomain(domain string) (*model.SourceResult, error) {

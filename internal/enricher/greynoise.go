@@ -26,7 +26,6 @@ func NewGreyNoise(apiKey string) *GreyNoiseEnricher {
 
 func (g *GreyNoiseEnricher) Name() string { return "greynoise" }
 
-// Only supports IPv4 per spec — community endpoint only handles IPv4.
 func (g *GreyNoiseEnricher) SupportedTypes() []detect.ObservableType {
 	return []detect.ObservableType{detect.TypeIPv4}
 }
@@ -36,7 +35,8 @@ func (g *GreyNoiseEnricher) Enrich(ctx context.Context, observable string, oType
 		return unsupportedResult(g.Name()), ErrUnsupportedType
 	}
 
-	endpoint := fmt.Sprintf("%s/community/%s", g.baseURL, observable)
+	// /v3/context returns full context for a single IP (requires API key).
+	endpoint := fmt.Sprintf("%s/context/%s", g.baseURL, observable)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return errResult(g.Name(), fmt.Sprintf("request error: %v", err)), nil
@@ -52,12 +52,15 @@ func (g *GreyNoiseEnricher) Enrich(ctx context.Context, observable string, oType
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return rateLimitedResult(g.Name()), nil
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return errResult(g.Name(), "invalid or missing API key"), nil
 	case resp.StatusCode == http.StatusNotFound:
-		// IP not seen by GreyNoise — valid result.
+		// IP not in GreyNoise dataset.
 		return &model.SourceResult{
 			Name:   g.Name(),
 			Status: "ok",
 			Data: map[string]any{
+				"seen":           false,
 				"noise":          false,
 				"riot":           false,
 				"classification": "unknown",
@@ -71,30 +74,67 @@ func (g *GreyNoiseEnricher) Enrich(ctx context.Context, observable string, oType
 	}
 
 	var raw struct {
-		IP             string `json:"ip"`
-		Noise          bool   `json:"noise"`
-		RIOT           bool   `json:"riot"`
-		Classification string `json:"classification"`
-		Name           string `json:"name"`
-		Link           string `json:"link"`
-		Message        string `json:"message"`
+		IP             string   `json:"ip"`
+		Seen           bool     `json:"seen"`
+		Noise          bool     `json:"noise"`
+		RIOT           bool     `json:"riot"`
+		Classification string   `json:"classification"`
+		Name           string   `json:"name"`
+		Link           string   `json:"link"`
+		Tags           []string `json:"tags"`
+		FirstSeen      string   `json:"first_seen"`
+		LastSeen       string   `json:"last_seen"`
+		Country        string   `json:"country"`
+		CountryCode    string   `json:"country_code"`
+		City           string   `json:"city"`
+		Organization   string   `json:"organization"`
+		ASN            string   `json:"asn"`
+		OS             string   `json:"os"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return errResult(g.Name(), fmt.Sprintf("decode error: %v", err)), nil
 	}
 
 	data := map[string]any{
+		"seen":           raw.Seen,
 		"noise":          raw.Noise,
 		"riot":           raw.RIOT,
 		"classification": raw.Classification,
-		"name":           raw.Name,
-		"link":           raw.Link,
+	}
+	if raw.Name != "" {
+		data["name"] = raw.Name
+	}
+	if len(raw.Tags) > 0 {
+		data["tags"] = raw.Tags
+	}
+	if raw.FirstSeen != "" {
+		data["first_seen"] = raw.FirstSeen
+	}
+	if raw.LastSeen != "" {
+		data["last_seen"] = raw.LastSeen
+	}
+	if raw.Country != "" {
+		data["country"] = raw.Country
+	}
+	if raw.Organization != "" {
+		data["organization"] = raw.Organization
+	}
+	if raw.ASN != "" {
+		data["asn"] = raw.ASN
+	}
+	if raw.OS != "" {
+		data["os"] = raw.OS
+	}
+
+	vizURL := fmt.Sprintf("https://viz.greynoise.io/ip/%s", observable)
+	if raw.Link != "" {
+		vizURL = raw.Link
 	}
 
 	return &model.SourceResult{
 		Name:   g.Name(),
 		Status: "ok",
 		Data:   data,
-		RawURL: raw.Link,
+		RawURL: vizURL,
 	}, nil
 }
