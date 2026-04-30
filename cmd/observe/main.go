@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -25,8 +26,21 @@ import (
 	"github.com/ctrlaltdean/observer/internal/runner"
 )
 
-// Version is set at build time via -ldflags.
+// Version is set at build time via -ldflags "-X main.Version=...".
+// For binaries installed with go install, resolveVersion() reads the embedded module info instead.
 var Version = "dev"
+
+func resolveVersion() string {
+	if Version != "dev" {
+		return Version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return Version
+}
 
 // ─── Bubbletea spinner model ──────────────────────────────────────────────────
 
@@ -156,7 +170,7 @@ func main() {
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("observe version %s\n", Version)
+			fmt.Printf("observe version %s\n", resolveVersion())
 		},
 	})
 
@@ -331,16 +345,17 @@ func runUpdate() error {
 		return fmt.Errorf("could not parse response: %w", err)
 	}
 
-	fmt.Printf("current: %s  latest: %s\n", Version, release.TagName)
+	ver := resolveVersion()
+	fmt.Printf("current: %s  latest: %s\n", ver, release.TagName)
 
-	if Version == "dev" {
+	if ver == "dev" {
 		fmt.Printf("Running a dev build — skipping auto-update.\n")
 		fmt.Printf("Latest release: %s\n  %s\n", release.TagName, release.HTMLURL)
 		return nil
 	}
 
 	// Normalize both to "vX.Y.Z" for comparison.
-	current := "v" + strings.TrimPrefix(Version, "v")
+	current := "v" + strings.TrimPrefix(ver, "v")
 	latest := "v" + strings.TrimPrefix(release.TagName, "v")
 	if current == latest {
 		fmt.Println("Already up to date.")
