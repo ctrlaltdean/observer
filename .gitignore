@@ -4,8 +4,8 @@
 # Compiled binaries
 dist/
 *.exe
-observe
-observer-server
+/observe
+/observer-server
 
 # Environment / secrets — never commit real keys
 .env
