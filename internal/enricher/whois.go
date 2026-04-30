@@ -2,8 +2,10 @@ package enricher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 
 	"github.com/likexian/whois"
@@ -13,9 +15,17 @@ import (
 	"github.com/ctrlaltdean/observer/internal/model"
 )
 
-type WHOISEnricher struct{}
+type WHOISEnricher struct {
+	rdapBaseURL string
+	client      *http.Client
+}
 
-func NewWHOIS() *WHOISEnricher { return &WHOISEnricher{} }
+func NewWHOIS() *WHOISEnricher {
+	return &WHOISEnricher{
+		rdapBaseURL: "https://rdap.arin.net/registry",
+		client:      newHTTPClient(),
+	}
+}
 
 func (w *WHOISEnricher) Name() string { return "whois" }
 
@@ -36,7 +46,6 @@ func (w *WHOISEnricher) Enrich(ctx context.Context, observable string, oType det
 	case detect.TypeDomain:
 		return w.enrichDomain(observable)
 	case detect.TypeURL:
-		// Extract domain from URL and do WHOIS on it.
 		domain := extractDomainFromURL(observable)
 		if domain == "" {
 			return errResult(w.Name(), "could not extract domain from URL"), nil
@@ -45,6 +54,43 @@ func (w *WHOISEnricher) Enrich(ctx context.Context, observable string, oType det
 	default:
 		return unsupportedResult(w.Name()), ErrUnsupportedType
 	}
+}
+
+// ─── IP enrichment via RDAP ───────────────────────────────────────────────────
+
+// rdapNetwork is the RDAP IP network object returned by any RIR.
+type rdapNetwork struct {
+	Name         string       `json:"name"`
+	Country      string       `json:"country"`
+	StartAddress string       `json:"startAddress"`
+	EndAddress   string       `json:"endAddress"`
+	Entities     []rdapEntity `json:"entities"`
+	Events       []rdapEvent  `json:"events"`
+	Links        []rdapLink   `json:"links"`
+	Cidrs        []rdapCIDR   `json:"cidr0_cidrs"`
+}
+
+type rdapEntity struct {
+	Handle     string       `json:"handle"`
+	Roles      []string     `json:"roles"`
+	VcardArray []any        `json:"vcardArray"`
+	Entities   []rdapEntity `json:"entities"`
+}
+
+type rdapEvent struct {
+	Action string `json:"eventAction"`
+	Date   string `json:"eventDate"`
+}
+
+type rdapLink struct {
+	Rel  string `json:"rel"`
+	Href string `json:"href"`
+}
+
+type rdapCIDR struct {
+	V4Prefix string `json:"v4prefix"`
+	V6Prefix string `json:"v6prefix"`
+	Length   int    `json:"length"`
 }
 
 func (w *WHOISEnricher) enrichIP(ctx context.Context, ip string) (*model.SourceResult, error) {
@@ -60,17 +106,36 @@ func (w *WHOISEnricher) enrichIP(ctx context.Context, ip string) (*model.SourceR
 		data["ptr_records"] = clean
 	}
 
-	// WHOIS lookup returns RIR-format text (ARIN/RIPE/APNIC/LACNIC/AFRINIC).
-	// whoisparser is domain-registrar-only, so we parse the raw text ourselves.
-	raw, err := whois.Whois(ip)
+	// RDAP returns structured JSON — arin.net bootstraps and redirects to the
+	// correct RIR (RIPE, APNIC, LACNIC, AFRINIC) automatically.
+	rdapURL := fmt.Sprintf("%s/ip/%s", w.rdapBaseURL, ip)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rdapURL, nil)
 	if err != nil {
-		if len(data) > 0 {
-			return &model.SourceResult{Name: w.Name(), Status: "ok", Data: data}, nil
-		}
-		return errResult(w.Name(), fmt.Sprintf("WHOIS query failed: %v", err)), nil
+		return partialOrErr(w.Name(), data, "RDAP request error: "+err.Error())
+	}
+	req.Header.Set("Accept", "application/rdap+json")
+
+	resp, err := w.client.Do(req)
+	if err != nil {
+		return partialOrErr(w.Name(), data, "RDAP query failed: "+err.Error())
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return partialOrErr(w.Name(), data, fmt.Sprintf("RDAP returned HTTP %d", resp.StatusCode))
 	}
 
-	parseRIRWhois(raw, data)
+	var network rdapNetwork
+	if err := json.NewDecoder(resp.Body).Decode(&network); err != nil {
+		return partialOrErr(w.Name(), data, "RDAP decode error: "+err.Error())
+	}
+
+	parseRDAPNetwork(&network, data)
+
+	// If RDAP gave us nothing useful and we also have no PTR, say so.
+	if len(data) == 0 {
+		return errResult(w.Name(), "no data returned from RDAP"), nil
+	}
 
 	return &model.SourceResult{
 		Name:   w.Name(),
@@ -80,63 +145,117 @@ func (w *WHOISEnricher) enrichIP(ctx context.Context, ip string) (*model.SourceR
 	}, nil
 }
 
-// parseRIRWhois extracts fields from raw RIR WHOIS text (ARIN/RIPE/APNIC/LACNIC/AFRINIC).
-// RIR format is key: value lines; we pick the first occurrence of each field we care about.
-func parseRIRWhois(raw string, data map[string]any) {
-	// Priority-ordered aliases for each logical field.
-	// First key in each slice that appears in the text wins.
-	fieldMap := []struct {
-		out     string
-		aliases []string
-	}{
-		{"organization", []string{"orgname", "organization", "org-name", "descr", "owner"}},
-		{"network_name", []string{"netname", "net-name"}},
-		{"cidr", []string{"cidr", "inetnum", "inet6num"}},
-		{"country", []string{"country"}},
-		{"registered", []string{"regdate", "created"}},
-		{"updated", []string{"updated", "last-modified", "changed"}},
-		{"rir", []string{"source"}},
-		{"asn", []string{"originas", "origin"}},
+func parseRDAPNetwork(n *rdapNetwork, data map[string]any) {
+	if n.Name != "" {
+		data["network_name"] = n.Name
+	}
+	if n.Country != "" {
+		data["country"] = n.Country
 	}
 
-	// Track which output fields we've already filled.
-	filled := map[string]bool{}
-
-	for _, line := range strings.Split(raw, "\n") {
-		// Skip comment lines.
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "%") {
-			continue
+	// Prefer CIDR notation; fall back to address range.
+	if len(n.Cidrs) > 0 {
+		c := n.Cidrs[0]
+		if c.V4Prefix != "" {
+			data["cidr"] = fmt.Sprintf("%s/%d", c.V4Prefix, c.Length)
+		} else if c.V6Prefix != "" {
+			data["cidr"] = fmt.Sprintf("%s/%d", c.V6Prefix, c.Length)
 		}
+	} else if n.StartAddress != "" && n.EndAddress != "" {
+		data["cidr"] = n.StartAddress + " – " + n.EndAddress
+	}
 
-		idx := strings.IndexByte(line, ':')
-		if idx < 0 {
-			continue
+	// Registration and last-changed dates.
+	for _, e := range n.Events {
+		date := e.Date
+		if len(date) > 10 {
+			date = date[:10]
 		}
-		rawKey := strings.ToLower(strings.TrimSpace(line[:idx]))
-		val := strings.TrimSpace(line[idx+1:])
-		if val == "" {
-			continue
+		switch e.Action {
+		case "registration":
+			data["registered"] = date
+		case "last changed":
+			data["updated"] = date
 		}
+	}
 
-		for _, f := range fieldMap {
-			if filled[f.out] {
-				continue
-			}
-			for _, alias := range f.aliases {
-				if rawKey == alias {
-					data[f.out] = val
-					filled[f.out] = true
-					break
-				}
-			}
-		}
-
-		if len(filled) == len(fieldMap) {
+	// RIR from self link.
+	for _, l := range n.Links {
+		if l.Rel == "self" {
+			data["rir"] = rdapRIR(l.Href)
 			break
 		}
 	}
+
+	// Organization and ASN from entities.
+	extractRDAPEntities(n.Entities, data)
 }
+
+func extractRDAPEntities(entities []rdapEntity, data map[string]any) {
+	for _, ent := range entities {
+		for _, role := range ent.Roles {
+			if role == "registrant" {
+				if org := vcardFN(ent.VcardArray); org != "" {
+					data["organization"] = org
+				}
+				break
+			}
+		}
+		// Recurse into nested entities (ARIN nests the registrant inside the network).
+		extractRDAPEntities(ent.Entities, data)
+	}
+}
+
+// vcardFN extracts the "fn" (full name) value from a vCard array.
+// vCard format: ["vcard", [[name, params, type, value], ...]]
+func vcardFN(vcardArray []any) string {
+	if len(vcardArray) < 2 {
+		return ""
+	}
+	props, ok := vcardArray[1].([]any)
+	if !ok {
+		return ""
+	}
+	for _, raw := range props {
+		prop, ok := raw.([]any)
+		if !ok || len(prop) < 4 {
+			continue
+		}
+		if name, ok := prop[0].(string); ok && name == "fn" {
+			if val, ok := prop[3].(string); ok {
+				return val
+			}
+		}
+	}
+	return ""
+}
+
+func rdapRIR(href string) string {
+	switch {
+	case strings.Contains(href, "arin.net"):
+		return "ARIN"
+	case strings.Contains(href, "ripe.net"):
+		return "RIPE"
+	case strings.Contains(href, "apnic.net"):
+		return "APNIC"
+	case strings.Contains(href, "lacnic.net"):
+		return "LACNIC"
+	case strings.Contains(href, "afrinic.net"):
+		return "AFRINIC"
+	default:
+		return ""
+	}
+}
+
+// partialOrErr returns a partial ok result if PTR data is available, otherwise an error result.
+func partialOrErr(name string, data map[string]any, msg string) (*model.SourceResult, error) {
+	if len(data) > 0 {
+		return &model.SourceResult{Name: name, Status: "ok", Data: data}, nil
+	}
+	return errResult(name, msg), nil
+}
+
+// ─── Domain enrichment via whoisparser ───────────────────────────────────────
 
 func (w *WHOISEnricher) enrichDomain(domain string) (*model.SourceResult, error) {
 	raw, err := whois.Whois(domain)
@@ -146,7 +265,6 @@ func (w *WHOISEnricher) enrichDomain(domain string) (*model.SourceResult, error)
 
 	parsed, err := whoisparser.Parse(raw)
 	if err != nil {
-		// Return raw data if parsing failed (some TLDs have non-standard formats).
 		return &model.SourceResult{
 			Name:   w.Name(),
 			Status: "ok",
@@ -186,6 +304,8 @@ func (w *WHOISEnricher) enrichDomain(domain string) (*model.SourceResult, error)
 	}, nil
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 func setIfNotEmpty(m map[string]any, key, val string) {
 	if val != "" {
 		m[key] = val
@@ -193,7 +313,6 @@ func setIfNotEmpty(m map[string]any, key, val string) {
 }
 
 func extractDomainFromURL(rawURL string) string {
-	// Simple extraction: strip scheme and take the host part.
 	s := rawURL
 	if i := strings.Index(s, "://"); i != -1 {
 		s = s[i+3:]
@@ -201,7 +320,6 @@ func extractDomainFromURL(rawURL string) string {
 	if i := strings.IndexAny(s, "/?#"); i != -1 {
 		s = s[:i]
 	}
-	// Strip port if present.
 	if i := strings.LastIndex(s, ":"); i != -1 {
 		s = s[:i]
 	}

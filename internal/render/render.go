@@ -327,6 +327,13 @@ func RenderTable(result *model.EnrichmentResult, w io.Writer) error {
 			}
 		}
 
+		// PTR records from WHOIS rDNS lookup.
+		if whoisSrc := result.Sources["whois"]; whoisSrc != nil && whoisSrc.Status == "ok" {
+			if ptrs := anyToStringSlice(whoisSrc.Data["ptr_records"]); len(ptrs) > 0 {
+				fmt.Fprintf(w, "  %-14s %s\n", applyIf(styleLabel, "PTR"), applyIf(styleDim, strings.Join(ptrs, ", ")))
+			}
+		}
+
 		fmt.Fprintln(w)
 	}
 
@@ -402,45 +409,55 @@ func RenderTable(result *model.EnrichmentResult, w io.Writer) error {
 	}
 
 	// ── WHOIS ─────────────────────────────────────────────────────────────
-	whois := result.Sources["whois"]
-	if whois != nil && whois.Status == "ok" && len(whois.Data) > 0 {
-		label := "WHOIS (" + result.Type + ")"
-		fmt.Fprintln(w, applyIf(styleSection, label))
-		d := whois.Data
-
+	whoisSrc := result.Sources["whois"]
+	if whoisSrc != nil && whoisSrc.Status == "ok" {
+		d := whoisSrc.Data
 		isIP := result.Type == "IPv4" || result.Type == "IPv6"
+
+		// For IPs: only render the section when we have actual RDAP data.
+		// PTR records are shown in Geo & Network; don't show an empty WHOIS block.
+		ipFields := []string{"organization", "network_name", "cidr", "country", "asn", "registered", "updated", "rir"}
+		hasIPData := false
 		if isIP {
-			// Fields populated by the RIR text parser.
-			for _, row := range [][2]string{
-				{"Organization", getString(d, "organization")},
-				{"Network", getString(d, "network_name")},
-				{"CIDR", getString(d, "cidr")},
-				{"Country", getString(d, "country")},
-				{"ASN", getString(d, "asn")},
-				{"Registered", getString(d, "registered")},
-				{"Updated", getString(d, "updated")},
-				{"RIR", getString(d, "rir")},
-			} {
-				if row[1] != "" {
-					fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, row[0]), applyIf(styleDim, row[1]))
+			for _, k := range ipFields {
+				if getString(d, k) != "" {
+					hasIPData = true
+					break
 				}
-			}
-			if ptrs := anyToStringSlice(d["ptr_records"]); len(ptrs) > 0 {
-				fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, "PTR"), applyIf(styleDim, strings.Join(ptrs, ", ")))
-			}
-		} else {
-			// Fields populated by whoisparser (domains/URLs).
-			for _, k := range []string{"registrar", "registrant_organization", "created_date", "updated_date", "expiration_date", "status"} {
-				if v := getString(d, k); v != "" {
-					display := strings.Title(strings.ReplaceAll(k, "_", " "))
-					fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, display), applyIf(styleDim, v))
-				}
-			}
-			if ns := anyToStringSlice(d["name_servers"]); len(ns) > 0 {
-				fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, "Name Servers"), applyIf(styleDim, strings.Join(ns, ", ")))
 			}
 		}
-		fmt.Fprintln(w)
+
+		if !isIP || hasIPData {
+			fmt.Fprintln(w, applyIf(styleSection, "WHOIS ("+result.Type+")"))
+
+			if isIP {
+				for _, row := range [][2]string{
+					{"Organization", getString(d, "organization")},
+					{"Network", getString(d, "network_name")},
+					{"CIDR", getString(d, "cidr")},
+					{"Country", getString(d, "country")},
+					{"ASN", getString(d, "asn")},
+					{"Registered", getString(d, "registered")},
+					{"Updated", getString(d, "updated")},
+					{"RIR", getString(d, "rir")},
+				} {
+					if row[1] != "" {
+						fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, row[0]), applyIf(styleDim, row[1]))
+					}
+				}
+			} else {
+				for _, k := range []string{"registrar", "registrant_organization", "created_date", "updated_date", "expiration_date", "status"} {
+					if v := getString(d, k); v != "" {
+						display := strings.Title(strings.ReplaceAll(k, "_", " "))
+						fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, display), applyIf(styleDim, v))
+					}
+				}
+				if ns := anyToStringSlice(d["name_servers"]); len(ns) > 0 {
+					fmt.Fprintf(w, "  %-24s %s\n", applyIf(styleLabel, "Name Servers"), applyIf(styleDim, strings.Join(ns, ", ")))
+				}
+			}
+			fmt.Fprintln(w)
+		}
 	}
 
 	// ── Sources status ────────────────────────────────────────────────────
