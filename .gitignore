@@ -1,0 +1,24 @@
+# Claude Code local settings
+.claude/
+
+# Compiled binaries
+dist/
+*.exe
+observe
+observer-server
+
+# Environment / secrets — never commit real keys
+.env
+
+# Go toolchain
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

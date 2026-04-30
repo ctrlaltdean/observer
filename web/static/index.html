@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observer — Observable Enrichment</title>
+<style>
+  :root {
+    --bg:          #0f1117;
+    --surface:     #1a1d2e;
+    --surface2:    #252840;
+    --border:      #2d3155;
+    --border2:     #3d4475;
+    --accent:      #7c3aed;
+    --accent2:     #6d28d9;
+    --accent-glow: rgba(124,58,237,.18);
+    --text:        #e2e8f0;
+    --text-dim:    #94a3b8;
+    --text-muted:  #64748b;
+    --green:       #4ade80;
+    --red:         #f87171;
+    --yellow:      #fbbf24;
+    --blue:        #60a5fa;
+    --purple:      #a78bfa;
+    --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
+    --mono:        'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* ── Layout ─────────────────────────────────────────────────────────── */
+  .layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* Sidebar — history placeholder */
+  .sidebar {
+    width: 240px;
+    min-width: 240px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: none; /* hidden — coming soon */
+    flex-direction: column;
+    padding: 16px;
+  }
+  .sidebar-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+  .sidebar-coming-soon {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-style: italic;
+  }
+
+  /* Main content */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 0 0 40px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────────── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 32px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo {
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: -.02em;
+    color: var(--purple);
+  }
+  .logo span { color: var(--text-dim); font-weight: 400; }
+  .header-tagline {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .header-right {
+    margin-left: auto;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .sources-badge {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    cursor: help;
+  }
+
+  /* ── Search area ─────────────────────────────────────────────────────── */
+  .search-container {
+    padding: 32px 32px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .search-row {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+    max-width: 900px;
+  }
+  .search-input-wrap {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+  .search-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 11px 14px;
+    padding-right: 110px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+  .search-input::placeholder { color: var(--text-muted); }
+  .type-badge {
+    position: absolute;
+    right: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    pointer-events: none;
+    transition: all .15s;
+  }
+  .type-badge.ipv4    { background: rgba(96,165,250,.15); border-color: var(--blue);   color: var(--blue); }
+  .type-badge.ipv6    { background: rgba(96,165,250,.12); border-color: var(--blue);   color: var(--blue); }
+  .type-badge.domain  { background: rgba(167,139,250,.15); border-color: var(--purple); color: var(--purple); }
+  .type-badge.url     { background: rgba(74,222,128,.12); border-color: var(--green);  color: var(--green); }
+  .type-badge.md5     { background: rgba(251,191,36,.12); border-color: var(--yellow); color: var(--yellow); }
+  .type-badge.sha1    { background: rgba(251,191,36,.12); border-color: var(--yellow); color: var(--yellow); }
+  .type-badge.sha256  { background: rgba(251,191,36,.12); border-color: var(--yellow); color: var(--yellow); }
+
+  .btn {
+    padding: 11px 22px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    transition: all .15s;
+  }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover { background: var(--accent2); }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-ghost {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { border-color: var(--border2); color: var(--text); }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+  .search-options {
+    margin-top: 12px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    max-width: 900px;
+  }
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 12px;
+    user-select: none;
+  }
+  .toggle-label input { cursor: pointer; accent-color: var(--accent); }
+  .sources-input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 10px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    outline: none;
+    width: 240px;
+  }
+  .sources-input:focus { border-color: var(--accent); }
+  .sources-input::placeholder { color: var(--text-muted); }
+
+  /* Bulk textarea */
+  .bulk-wrap { display: none; max-width: 900px; }
+  .bulk-wrap.active { display: block; }
+  .bulk-textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    outline: none;
+    resize: vertical;
+    min-height: 120px;
+  }
+  .bulk-textarea:focus { border-color: var(--accent); }
+
+  /* ── Results area ─────────────────────────────────────────────────────── */
+  .results-area { padding: 24px 32px; max-width: 1100px; }
+
+  /* Loading state */
+  .loading {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    padding: 40px 0;
+    color: var(--text-muted);
+  }
+  .loading.active { display: flex; }
+  .spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Error state */
+  .error-box {
+    display: none;
+    background: rgba(248,113,113,.1);
+    border: 1px solid rgba(248,113,113,.3);
+    border-radius: 8px;
+    padding: 16px 20px;
+    color: var(--red);
+    margin-bottom: 20px;
+  }
+  .error-box.active { display: block; }
+
+  /* ── Cards ───────────────────────────────────────────────────────────── */
+  .result-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .result-observable {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .result-type-badge {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 4px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--purple);
+  }
+  .result-ts {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-left: auto;
+  }
+  .result-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+
+  /* Classification section */
+  .classification-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 24px;
+    margin-bottom: 20px;
+  }
+  .classification-card h3 {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+  }
+  .classification-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .class-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    font-size: 13px;
+  }
+  .class-badge .label { color: var(--text-muted); }
+  .class-badge .value { font-weight: 600; }
+  .class-badge.true-val { border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.08); }
+  .class-badge.true-val .value { color: var(--red); }
+  .class-badge.benign-val { border-color: rgba(74,222,128,.3); background: rgba(74,222,128,.06); }
+  .class-badge.benign-val .value { color: var(--green); }
+
+  /* Source cards */
+  .sources-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+    gap: 16px;
+  }
+  .source-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .source-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 18px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+  .source-name {
+    font-weight: 700;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.ok           { background: var(--green); }
+  .status-dot.error        { background: var(--red); }
+  .status-dot.rate_limited { background: var(--yellow); }
+  .status-dot.unsupported  { background: var(--text-muted); }
+  .status-label {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    margin-left: auto;
+  }
+  .status-label.ok           { background: rgba(74,222,128,.15); color: var(--green); }
+  .status-label.error        { background: rgba(248,113,113,.15); color: var(--red); }
+  .status-label.rate_limited { background: rgba(251,191,36,.15);  color: var(--yellow); }
+  .status-label.unsupported  { background: var(--surface); color: var(--text-muted); }
+  .source-raw-url {
+    font-size: 11px;
+    color: var(--accent);
+    text-decoration: none;
+    margin-left: 4px;
+  }
+  .source-raw-url:hover { text-decoration: underline; }
+
+  .source-card-body { padding: 14px 18px; }
+  .source-error-msg {
+    font-size: 12px;
+    color: var(--red);
+    font-family: var(--mono);
+    margin-bottom: 8px;
+  }
+  .data-table { width: 100%; border-collapse: collapse; }
+  .data-table tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
+  .data-table td {
+    padding: 5px 0;
+    vertical-align: top;
+    font-size: 13px;
+  }
+  .data-table td:first-child {
+    color: var(--text-muted);
+    width: 45%;
+    padding-right: 12px;
+    white-space: nowrap;
+  }
+  .data-table td:last-child {
+    font-family: var(--mono);
+    color: var(--text);
+    word-break: break-all;
+  }
+  .empty-source { color: var(--text-muted); font-size: 12px; font-style: italic; }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    padding: 16px;
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    margin-top: auto;
+  }
+
+  /* Toast notifications */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 13px;
+    color: var(--text);
+    box-shadow: 0 4px 20px rgba(0,0,0,.4);
+    opacity: 0;
+    transform: translateY(8px);
+    transition: all .2s;
+    pointer-events: none;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+</style>
+</head>
+<body>
+
+<!-- ── Header ────────────────────────────────────────────────────────────── -->
+<div class="header">
+  <div class="logo">Observer <span>// enrichment</span></div>
+  <div class="header-tagline">IP · Domain · URL · Hash</div>
+  <div class="header-right">
+    <div class="sources-badge" id="sourcesBadge" title="Configured sources">Loading sources…</div>
+  </div>
+</div>
+
+<div class="layout">
+  <!-- Sidebar (history placeholder — coming soon) -->
+  <div class="sidebar">
+    <div class="sidebar-title">History</div>
+    <div class="sidebar-coming-soon">Coming soon</div>
+  </div>
+
+  <!-- Main -->
+  <div class="main">
+
+    <!-- Search -->
+    <div class="search-container">
+      <div class="search-row" id="singleRow">
+        <div class="search-input-wrap">
+          <input
+            class="search-input"
+            id="searchInput"
+            type="text"
+            placeholder="1.2.3.4 · evil.com · https://… · d41d8cd98f00b204…"
+            autocomplete="off"
+            spellcheck="false"
+          >
+          <span class="type-badge" id="typeBadge">—</span>
+        </div>
+        <button class="btn btn-primary" id="enrichBtn">Enrich</button>
+      </div>
+
+      <div class="bulk-wrap" id="bulkWrap">
+        <textarea
+          class="bulk-textarea"
+          id="bulkInput"
+          placeholder="One observable per line. Lines starting with # are ignored."
+          rows="5"
+        ></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn btn-primary" id="bulkBtn">Enrich All</button>
+        </div>
+      </div>
+
+      <div class="search-options">
+        <label class="toggle-label">
+          <input type="checkbox" id="bulkToggle"> Bulk input
+        </label>
+        <input
+          class="sources-input"
+          id="sourcesFilter"
+          type="text"
+          placeholder="Sources: shodan,vt,otx (all if empty)"
+        >
+      </div>
+    </div>
+
+    <!-- Results -->
+    <div class="results-area">
+      <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <span id="loadingLabel">Enriching observable…</span>
+      </div>
+
+      <div class="error-box" id="errorBox"></div>
+
+      <div id="resultContainer"></div>
+    </div>
+
+    <div class="footer">
+      Observer — Observable Enrichment Tool &nbsp;·&nbsp;
+      <a href="/api/health" style="color:var(--accent);text-decoration:none">API health</a>
+    </div>
+  </div><!-- /.main -->
+</div><!-- /.layout -->
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── API key (read from localStorage if present) ─────────────────────────
+  const getAPIKey = () => localStorage.getItem('observer_api_key') || '';
+
+  function apiFetch(url, opts = {}) {
+    const key = getAPIKey();
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (key) headers['X-API-Key'] = key;
+    return fetch(url, { ...opts, headers });
+  }
+
+  // ── Toast ────────────────────────────────────────────────────────────────
+  function showToast(msg) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    setTimeout(() => el.classList.remove('show'), 2200);
+  }
+
+  // ── Observable type detection (mirrors backend detect package) ───────────
+  const PATTERNS = {
+    url:    /^(https?|ftp):\/\//i,
+    ipv4:   /^(\d{1,3}\.){3}\d{1,3}$/,
+    ipv6:   /^([0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}$/i,
+    md5:    /^[0-9a-f]{32}$/i,
+    sha1:   /^[0-9a-f]{40}$/i,
+    sha256: /^[0-9a-f]{64}$/i,
+    domain: /^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/,
+  };
+  function detectType(s) {
+    s = s.trim();
+    if (!s) return null;
+    for (const [type, re] of Object.entries(PATTERNS)) {
+      if (re.test(s)) {
+        if (type === 'ipv4') {
+          const parts = s.split('.').map(Number);
+          if (parts.every(n => n <= 255)) return 'ipv4';
+          continue;
+        }
+        return type;
+      }
+    }
+    return null;
+  }
+
+  // ── Type badge update ────────────────────────────────────────────────────
+  const searchInput = document.getElementById('searchInput');
+  const typeBadge   = document.getElementById('typeBadge');
+
+  function updateBadge(val) {
+    const t = detectType(val);
+    typeBadge.className = 'type-badge' + (t ? ' ' + t : '');
+    typeBadge.textContent = t ? t.toUpperCase() : '—';
+  }
+
+  searchInput.addEventListener('input', e => updateBadge(e.target.value));
+
+  // ── Bulk toggle ──────────────────────────────────────────────────────────
+  const bulkToggle = document.getElementById('bulkToggle');
+  const singleRow  = document.getElementById('singleRow');
+  const bulkWrap   = document.getElementById('bulkWrap');
+
+  bulkToggle.addEventListener('change', () => {
+    const isBulk = bulkToggle.checked;
+    bulkWrap.classList.toggle('active', isBulk);
+    singleRow.style.display = isBulk ? 'none' : 'flex';
+  });
+
+  // ── Submit handlers ──────────────────────────────────────────────────────
+  document.getElementById('enrichBtn').addEventListener('click', runSingle);
+  searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') runSingle(); });
+  document.getElementById('bulkBtn').addEventListener('click', runBulk);
+
+  function sourcesParam() {
+    return document.getElementById('sourcesFilter').value.trim();
+  }
+
+  async function runSingle() {
+    const q = searchInput.value.trim();
+    if (!q) return;
+    const sources = sourcesParam();
+    let url = `/api/enrich?q=${encodeURIComponent(q)}`;
+    if (sources) url += `&sources=${encodeURIComponent(sources)}`;
+    await doEnrich(() => apiFetch(url), q);
+  }
+
+  async function runBulk() {
+    const raw = document.getElementById('bulkInput').value;
+    const observables = raw.split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('#'));
+    if (!observables.length) return;
+    setLoading(true, `Enriching ${observables.length} observables…`);
+    clearResults();
+    try {
+      const resp = await apiFetch('/api/enrich/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ observables }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        showError(err.error || 'Unknown error');
+        return;
+      }
+      const data = await resp.json();
+      renderBulkResults(data.results || []);
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function doEnrich(fetchFn, label) {
+    setLoading(true, `Enriching ${label} …`);
+    clearResults();
+    try {
+      const resp = await fetchFn();
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        showError(err.error || `HTTP ${resp.status}`);
+        return;
+      }
+      const result = await resp.json();
+      renderResult(result);
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // ── State helpers ─────────────────────────────────────────────────────────
+  function setLoading(on, label = 'Enriching…') {
+    const el = document.getElementById('loading');
+    el.classList.toggle('active', on);
+    document.getElementById('loadingLabel').textContent = label;
+    document.getElementById('enrichBtn').disabled = on;
+    document.getElementById('bulkBtn').disabled   = on;
+  }
+  function clearResults() {
+    document.getElementById('resultContainer').innerHTML = '';
+    document.getElementById('errorBox').classList.remove('active');
+  }
+  function showError(msg) {
+    const el = document.getElementById('errorBox');
+    el.textContent = '⚠ ' + msg;
+    el.classList.add('active');
+  }
+
+  // ── Rendering ─────────────────────────────────────────────────────────────
+  function renderBulkResults(results) {
+    results.forEach(r => {
+      if (r && r.observable) renderResult(r);
+    });
+  }
+
+  function renderResult(result) {
+    const container = document.getElementById('resultContainer');
+    const wrap = document.createElement('div');
+    wrap.style.marginBottom = '40px';
+    wrap.innerHTML = buildResultHTML(result);
+    container.appendChild(wrap);
+
+    // Copy buttons
+    wrap.querySelector('[data-copy="json"]')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(JSON.stringify(result, null, 2));
+      showToast('Copied JSON');
+    });
+    wrap.querySelector('[data-copy="md"]')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(resultToMarkdown(result));
+      showToast('Copied Markdown');
+    });
+    wrap.querySelector('[data-copy="text"]')?.addEventListener('click', () => {
+      navigator.clipboard.writeText(resultToText(result));
+      showToast('Copied plaintext');
+    });
+  }
+
+  function buildResultHTML(result) {
+    const ts = new Date(result.timestamp).toLocaleString();
+    const sources = result.sources || {};
+
+    // Classification section
+    const ipinfo    = sources['ipinfo'];
+    const greynoise = sources['greynoise'];
+    let classHtml = '';
+    if ((ipinfo?.status === 'ok') || (greynoise?.status === 'ok')) {
+      const badges = [];
+      if (ipinfo?.status === 'ok') {
+        const d = ipinfo.data || {};
+        badges.push(classBadge('VPN',      d.vpn,     d.service));
+        badges.push(classBadge('TOR',      d.tor,     ''));
+        badges.push(classBadge('Proxy',    d.proxy,   ''));
+        badges.push(classBadge('Hosting',  d.hosting, d.org));
+      }
+      if (greynoise?.status === 'ok') {
+        const d = greynoise.data || {};
+        const noiseLabel = d.noise
+          ? `YES — ${d.classification || 'scanning'}`
+          : `No (${d.classification || 'unknown'})`;
+        const noiseCls   = d.noise && d.classification === 'malicious' ? 'true-val' : (d.noise ? '' : 'benign-val');
+        badges.push(`<div class="class-badge ${noiseCls}"><span class="label">GN Noise</span><span class="value">${esc(noiseLabel)}</span></div>`);
+        const riotLabel  = d.riot ? `YES — ${esc(d.name || 'RIOT')}` : 'No';
+        badges.push(`<div class="class-badge ${d.riot ? 'benign-val' : ''}"><span class="label">GN RIOT</span><span class="value">${riotLabel}</span></div>`);
+      }
+      classHtml = `
+        <div class="classification-card">
+          <h3>Classification</h3>
+          <div class="classification-grid">${badges.join('')}</div>
+        </div>`;
+    }
+
+    // Source cards
+    const sourceOrder = ['shodan','virustotal','abuseipdb','whois','otx','ipinfo','greynoise'];
+    const orderedKeys = [
+      ...sourceOrder.filter(k => sources[k]),
+      ...Object.keys(sources).filter(k => !sourceOrder.includes(k)),
+    ];
+    const cardsHtml = orderedKeys.map(name => sourceCard(name, sources[name])).join('');
+
+    return `
+      <div class="result-header">
+        <div class="result-observable">${esc(result.observable)}</div>
+        <div class="result-type-badge">${esc(result.type)}</div>
+        <div class="result-ts">${ts}</div>
+      </div>
+      <div class="result-actions">
+        <button class="btn btn-ghost btn-sm" data-copy="json">Copy JSON</button>
+        <button class="btn btn-ghost btn-sm" data-copy="md">Copy Markdown</button>
+        <button class="btn btn-ghost btn-sm" data-copy="text">Copy Text</button>
+      </div>
+      ${classHtml}
+      <div class="sources-grid">${cardsHtml}</div>
+    `;
+  }
+
+  function classBadge(label, val, extra) {
+    const cls = val ? 'true-val' : 'benign-val';
+    const txt = val ? 'YES' + (extra ? ` (${esc(extra)})` : '') : 'No';
+    return `<div class="class-badge ${cls}"><span class="label">${esc(label)}</span><span class="value">${txt}</span></div>`;
+  }
+
+  function sourceCard(name, sr) {
+    if (!sr) return '';
+    const status = sr.status || 'unknown';
+    const rawURL = sr.raw_url
+      ? `<a class="source-raw-url" href="${esc(sr.raw_url)}" target="_blank" rel="noopener">↗ view</a>`
+      : '';
+    let bodyHtml = '';
+
+    if (sr.error_message) {
+      bodyHtml += `<div class="source-error-msg">${esc(sr.error_message)}</div>`;
+    }
+
+    if (status === 'ok' && sr.data && Object.keys(sr.data).length > 0) {
+      const rows = flattenData(sr.data);
+      if (rows.length > 0) {
+        bodyHtml += `<table class="data-table">` +
+          rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('') +
+          `</table>`;
+      } else {
+        bodyHtml += `<div class="empty-source">No data returned</div>`;
+      }
+    } else if (status !== 'ok') {
+      bodyHtml += bodyHtml ? '' : `<div class="empty-source">${esc(status)}</div>`;
+    }
+
+    return `
+      <div class="source-card">
+        <div class="source-card-header">
+          <div class="status-dot ${status}"></div>
+          <div class="source-name">${esc(name)}</div>
+          ${rawURL}
+          <span class="status-label ${status}">${esc(status.replace('_', ' '))}</span>
+        </div>
+        <div class="source-card-body">${bodyHtml || '<div class="empty-source">—</div>'}</div>
+      </div>`;
+  }
+
+  function flattenData(obj, prefix = '') {
+    const rows = [];
+    for (const [k, v] of Object.entries(obj)) {
+      const key = prefix ? `${prefix}.${k}` : k;
+      if (v === null || v === undefined) continue;
+      if (typeof v === 'object' && !Array.isArray(v)) {
+        rows.push(...flattenData(v, key));
+      } else if (Array.isArray(v)) {
+        const display = v.map(item =>
+          typeof item === 'object' ? JSON.stringify(item) : String(item)
+        ).join(', ');
+        rows.push([key, display]);
+      } else {
+        rows.push([key, String(v)]);
+      }
+    }
+    return rows;
+  }
+
+  // ── Copy helpers ──────────────────────────────────────────────────────────
+  function resultToMarkdown(result) {
+    let md = `# Observer Report\n\n`;
+    md += `**Observable:** \`${result.observable}\`  **Type:** ${result.type}  \n`;
+    md += `**Timestamp:** ${new Date(result.timestamp).toISOString()}  \n\n`;
+    for (const [name, sr] of Object.entries(result.sources || {})) {
+      md += `## ${name.toUpperCase()}\n\n`;
+      md += `**Status:** ${sr.status}  \n`;
+      if (sr.error_message) md += `**Error:** ${sr.error_message}  \n`;
+      if (sr.raw_url) md += `**Source:** [${name}](${sr.raw_url})  \n`;
+      const rows = flattenData(sr.data || {});
+      if (rows.length) {
+        md += `\n| Field | Value |\n|---|---|\n`;
+        rows.forEach(([k, v]) => { md += `| ${k} | ${v} |\n`; });
+      }
+      md += '\n';
+    }
+    return md;
+  }
+
+  function resultToText(result) {
+    let txt = `Observable: ${result.observable} (${result.type})\n`;
+    txt += `Timestamp: ${result.timestamp}\n\n`;
+    for (const [name, sr] of Object.entries(result.sources || {})) {
+      txt += `[${name}] status: ${sr.status}\n`;
+      if (sr.error_message) txt += `  error: ${sr.error_message}\n`;
+      flattenData(sr.data || {}).forEach(([k, v]) => {
+        txt += `  ${k}: ${v}\n`;
+      });
+      txt += '\n';
+    }
+    return txt;
+  }
+
+  // ── Escape HTML ───────────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Load sources on startup ───────────────────────────────────────────────
+  async function loadSources() {
+    try {
+      const resp = await apiFetch('/api/sources');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const configured = (data.sources || []).filter(s => s.configured).map(s => s.name);
+      const badge = document.getElementById('sourcesBadge');
+      badge.textContent = `${configured.length} source${configured.length !== 1 ? 's' : ''} active`;
+      badge.title = 'Active: ' + configured.join(', ');
+    } catch (_) {
+      document.getElementById('sourcesBadge').textContent = '—';
+    }
+  }
+
+  loadSources();
+})();
+</script>
+</body>
+</html>
